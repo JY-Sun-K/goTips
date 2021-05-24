@@ -1,1230 +1,770 @@
-# 基于websocket单台机器支持百万连接分布式聊天(IM)系统
+##  Mutex
 
+1. 互斥锁是并发控制的一个基本手段，是为了避免竞争而建立的一种并发控制机制。
 
+2. 临界区就是一个被共享的资源，或者说是一个整体的一组共享资源
 
-本文将介绍如何实现一个基于websocket分布式聊天(IM)系统。
+3. 使用互斥锁，限定临界区只能同时由一个线程持有。
 
-使用golang实现websocket通讯，单机可以支持百万连接，使用gin框架、nginx负载、可以水平部署、程序内部相互通讯、使用grpc通讯协议。
+4. 同步原语的适用场景：
 
-本文内容比较长，如果直接想clone项目体验直接进入[项目体验](#12-项目体验) [goWebSocket项目下载](#4goWebSocket-项目) ,文本从介绍webSocket是什么开始，然后开始介绍这个项目，以及在Nginx中配置域名做webSocket的转发，然后介绍如何搭建一个分布式系统。
+   - 共享资源。并发地读写共享资源，会出现数据竞争（data race）的问题，所以需要 Mutex、RWMutex 这样的并发原语来保护
+   - 任务编排。需要 goroutine 按照一定的规律执行，而 goroutine 之间有相互等待或者依赖的顺序关系，我们常常使用 WaitGroup 或者 Channel 来实现
+   - 消息传递。信息交流以及不同的 goroutine 之间的线程安全的数据交流，常常使用 Channel 来实现。
 
+5. 互斥锁 Mutex 就提供两个方法 Lock 和 Unlock：进入临界区之前调用 Lock 方法，退出临界区的时候调用 Unlock 方法
 
-## 目录
-- [1、项目说明](#1项目说明)
-    - [1.1 goWebSocket](#11-goWebSocket)
-    - [1.2 项目体验](#12-项目体验)
-- [2、介绍webSocket](#2介绍webSocket)
-    - [2.1 webSocket 是什么](#21-webSocket-是什么)
-    - [2.2 webSocket的兼容性](#22-webSocket的兼容性)
-    - [2.3 为什么要用webSocket](#23-为什么要用webSocket)
-    - [2.4 webSocket建立过程](#24-webSocket建立过程)
-- [3、如何实现基于webSocket的长连接系统](#3如何实现基于webSocket的长连接系统)
-    - [3.1 使用go实现webSocket服务端](#31-使用go实现webSocket服务端)
-        - [3.1.1 启动端口监听](#311-启动端口监听)
-        - [3.1.2 升级协议](#312-升级协议)
-        - [3.1.3 客户端连接的管理](#313-客户端连接的管理)
-        - [3.1.4 注册客户端的socket的写的异步处理程序](#314-注册客户端的socket的写的异步处理程序)
-        - [3.1.5 注册客户端的socket的读的异步处理程序](#315-注册客户端的socket的读的异步处理程序)
-        - [3.1.6 接收客户端数据并处理](#316-接收客户端数据并处理)
-        - [3.1.7 使用路由的方式处理客户端的请求数据](#317-使用路由的方式处理客户端的请求数据)
-        - [3.1.8 防止内存溢出和Goroutine不回收](#318-防止内存溢出和Goroutine不回收)
-    - [3.2 使用javaScript实现webSocket客户端](#32-使用javaScript实现webSocket客户端)
-        - [3.2.1 启动并注册监听程序](#321-启动并注册监听程序)
-        - [3.2.2 发送数据](#322-发送数据)
-    - [3.3 发送消息](#33-发送消息)
-        - [3.3.1 文本消息](#331-文本消息)
-        - [3.3.2 图片和语言消息](#332-图片和语言消息)
-- [4、goWebSocket 项目](#4goWebSocket-项目)
-    - [4.1 项目说明](#41-项目说明)
-    - [4.2 项目依赖](#42-项目依赖)
-    - [4.3 项目启动](#43-项目启动)
-    - [4.4 接口文档](#44-接口文档)
-        - [4.4.1 HTTP接口文档](#441-HTTP接口文档)
-            - [4.4.1.1 接口说明](#4411-接口说明)
-            - [4.4.1.2 聊天页面](#4412-聊天页面)
-            - [4.4.1.3 获取房间用户列表](#4413-获取房间用户列表)
-            - [4.4.1.4 查询用户是否在线](#4414-查询用户是否在线)
-            - [4.4.1.5 给用户发送消息](#4415-给用户发送消息)
-            - [4.4.1.6 给全员用户发送消息](#4416-给全员用户发送消息)
-        - [4.4.2 RPC接口文档](#442-RPC接口文档)
-            - [4.4.2.1 接口说明](#4421-接口说明)
-            - [4.4.2.2 查询用户是否在线](#4422-查询用户是否在线)
-            - [4.4.2.3 发送消息](#4423-发送消息)
-            - [4.4.2.4 给指定房间所有用户发送消息](#4424-给指定房间所有用户发送消息)
-            - [4.4.2.5 获取房间内全部用户](#4425-获取房间内全部用户)
-- [5、webSocket项目Nginx配置](#5webSocket项目Nginx配置)
-    - [5.1 为什么要配置Nginx](#51-为什么要配置Nginx)
-    - [5.2 nginx配置](#52-nginx配置)
-    - [5.3 问题处理](#53-问题处理)
-- [6、压测](#6压测)
-    - [6.1 Linux内核优化](#61-Linux内核优化)
-    - [6.2 压测准备](#62-压测准备)
-    - [6.3 压测数据](#63-压测数据)
-- [7、如何基于webSocket实现一个分布式Im](#7如何基于webSocket实现一个分布式Im)
-    - [7.1 说明](#71-说明)
-    - [7.2 架构](#72-架构)
-    - [7.3 分布式系统部署](#73-分布式系统部署)
-- [8、回顾和反思](#8回顾和反思)
-    - [8.1 在其它系统应用](#81-在其它系统应用)
-    - [8.2 需要完善、优化](#82-需要完善优化)
-    - [8.3 总结](#83-总结)
-- [9、参考文献](#9参考文献)
+6. ##### Mutex 的架构演进分成了四个阶段
 
+   1. “初版”的 Mutex 使用一个 flag 来表示锁是否被持有，实现比较简单；
+   2. “给新人机会”后来照顾到新来的 goroutine，所以会让新的 goroutine 也尽可能地先获取到锁
+   3. “多给些机会”，照顾新来的和被唤醒的 goroutine
+   4. “解决饥饿”目前又加入了饥饿的解决方案
 
-## 1、项目说明
-#### 1.1 goWebSocket
+   ![img](C:\Users\king\Desktop\go并发\c28531b47ff7f220d5bc3c9650180835.jpg)
 
-本文将介绍如何实现一个基于websocket聊天(IM)分布式系统。
+7. CAS 指令将给定的值和一个内存地址中的值进行比较，如果它们是同一个值，就使用新值替换内存地址中的值，这个操作是原子性的。那啥是原子性呢？如果你还不太理解这个概念，那么在这里只需要明确一点就行了，那就是原子性保证这个指令总是基于最新的值进行计算，如果同时有其它线程已经修改了这个值，那么，CAS 会返回失败。
 
-使用golang实现websocket通讯，单机支持百万连接，使用gin框架、nginx负载、可以水平部署、程序内部相互通讯、使用grpc通讯协议。
+8. ![img](C:\Users\king\Desktop\go并发\825e23e1af96e78f3773e0b45de38e25.jpg)
 
-- 一般项目中webSocket使用的架构图
-![网站架构图](https://img.mukewang.com/5d4e510000018ff510320842.png)
+9. Unlock 方法可以被任意的 goroutine 调用释放锁，即使是没持有这个互斥锁的 goroutine，也可以进行这个操作。这是因为，Mutex 本身并没有包含持有这把锁的 goroutine 的信息，所以，Unlock 也不会对此进行检查。Mutex 的这个设计一直保持至今。
 
-#### 1.2 项目体验
-- [项目地址 gowebsocket](https://github.com/link1st/gowebsocket)
-- [IM-聊天首页](http://im.91vh.com/home/index) 或者在新的窗口打开 http://im.91vh.com/home/index
-- 打开连接以后进入聊天界面
-- 多人群聊可以同时打开两个窗口
+10. 如果临界区只是方法中的一部分，为了尽快释放锁，还是应该第一时间调用 Unlock，而不是一直等到方法返回时才释放。
 
-## 2、介绍webSocket
-### 2.1 webSocket 是什么
-WebSocket 协议在2008年诞生，2011年成为国际标准。所有浏览器都已经支持了。
+11. ![img](C:\Users\king\Desktop\go并发\4c4a3dd2310059821f41af7b84925615.jpg)
 
-它的最大特点就是，服务器可以主动向客户端推送信息，客户端也可以主动向服务器发送信息，是真正的双向平等对话，属于服务器推送技术的一种。
+12. 因为新来的 goroutine 也参与竞争，有可能每次都会被新来的 goroutine 抢到获取锁的机会，在极端情况下，等待中的 goroutine 可能会一直获取不到锁，这就是饥饿问题。
 
-- HTTP和WebSocket在通讯过程的比较
-![HTTP协议和WebSocket比较](https://img.mukewang.com/5d4cf0750001bc4706280511.png)
+13. ![img](C:\Users\king\Desktop\go并发\e0c23794c8a1d355a7a183400c036276.jpg)
 
-- HTTP和webSocket都支持配置证书，`ws://` 无证书 `wss://` 配置证书的协议标识
-![HTTP协议和WebSocket比较](https://img.mukewang.com/5d4cf1180001493404180312.jpg)
+14. 只需要记住，Mutex 绝不容忍一个 goroutine 被落下，永远没有机会获取锁。不抛弃不放弃是它的宗旨，而且它也尽可能地让等待较长的 goroutine 更有机会获取到锁。
 
-### 2.2 webSocket的兼容性
-- 浏览器的兼容性，开始支持webSocket的版本
+15. ##### 饥饿模式和正常模式
 
-![浏览器开始支持webSocket的版本](https://img.mukewang.com/5d4cf2170001859e12190325.jpg)
+    ​	Mutex 可能处于两种操作模式下：正常模式和饥饿模式。接下来我们分析一下 Mutex 对饥饿模式和正常模式的处理。请求锁时调用的 Lock 方法中一开始是 fast path，这是一个幸运的场景，当前的 goroutine 幸运地获得了锁，没有竞争，直接返回，否则就进入了 lockSlow 方法。这样的设计，方便编译器对 Lock 方法进行内联，你也可以在程序开发中应用这个技巧。正常模式下，waiter 都是进入先入先出队列，被唤醒的 waiter 并不会直接持有锁，而是要和新来的 goroutine 进行竞争。新来的 goroutine 有先天的优势，它们正在 CPU 中运行，可能它们的数量还不少，所以，在高并发情况下，被唤醒的 waiter 可能比较悲剧地获取不到锁，这时，它会被插入到队列的前面。如果 waiter 获取不到锁的时间超过阈值 1 毫秒，那么，这个 Mutex 就进入到了饥饿模式。在饥饿模式下，Mutex 的拥有者将直接把锁交给队列最前面的 waiter。新来的 goroutine 不会尝试获取锁，即使看起来锁没有被持有，它也不会去抢，也不会 spin，它会乖乖地加入到等待队列的尾部。如果拥有 Mutex 的 waiter 发现下面两种情况的其中之一，它就会把这个 Mutex 转换成正常模式:此 waiter 已经是队列中的最后一个 waiter 了，没有其它的等待锁的 goroutine 了；此 waiter 的等待时间小于 1 毫秒。正常模式拥有更好的性能，因为即使有等待抢锁的 waiter，goroutine 也可以连续多次获取到锁。饥饿模式是对公平性和性能的一种平衡，它避免了某些 goroutine 长时间的等待锁。在饥饿模式下，优先对待的是那些一直在等待的 waiter。
 
-- 服务端的支持
+16. Package sync 的同步原语在使用后是不能复制的。我们知道 Mutex 是最常用的一个同步原语，那它也是不能复制的。
 
-golang、java、php、node.js、python、nginx 都有不错的支持
+17. mutex常见的 4 种错误场景
 
-- Android和IOS的支持
+    - Lock/Unlock 不是成对出现
 
-Android可以使用java-webSocket对webSocket支持
+    - Copy 已使用的 Mutex
 
-iOS 4.2及更高版本具有WebSockets支持
+    - 重入
 
-### 2.3 为什么要用webSocket
-- 1. 从业务上出发，需要一个主动通达客户端的能力
-> 目前大多数的请求都是使用HTTP，都是由客户端发起一个请求，有服务端处理，然后返回结果，不可以服务端主动向某一个客户端主动发送数据 
+      ```
+      
+      func foo(l sync.Locker) {
+          fmt.Println("in foo")
+          l.Lock()
+          bar(l)
+          l.Unlock()
+      }
+      
+      
+      func bar(l sync.Locker) {
+          l.Lock()
+          fmt.Println("in bar")
+          l.Unlock()
+      }
+      
+      
+      func main() {
+          l := &sync.Mutex{}
+          foo(l)
+      }
+      ```
 
-![服务端处理一个请求](https://img.mukewang.com/5d4cf5650001773612800720.jpg)
-- 2. 大多数场景我们需要主动通知用户，如:聊天系统、用户完成任务主动告诉用户、一些运营活动需要通知到在线的用户
-- 3. 可以获取用户在线状态
-- 4. 在没有长连接的时候通过客户端主动轮询获取数据
-- 5. 可以通过一种方式实现，多种不同平台(H5/Android/IOS)去使用
+    - 死锁
+    
+18. 锁是性能下降的“罪魁祸首”之一，所以，有效地降低锁的竞争，就能够很好地提高性能。因此，监控关键互斥锁上等待的 goroutine 的数量，是我们分析锁竞争的激烈程度的一个重要指标
 
-### 2.4 webSocket建立过程
-- 1. 客户端先发起升级协议的请求
+### TryLock
 
-客户端发起升级协议的请求，采用标准的HTTP报文格式，在报文中添加头部信息 
+当一个 goroutine 调用这个 TryLock 方法请求锁的时候，如果这把锁没有被其他 goroutine 所持有，那么，这个 goroutine 就持有了这把锁，并返回 true；如果这把锁已经被其他 goroutine 所持有，或者是正在准备交给某个被唤醒的 goroutine，那么，这个请求锁的 goroutine 就直接返回 false，不会阻塞在方法调用上。
 
-`Connection: Upgrade`表明连接需要升级
-
-`Upgrade: websocket`需要升级到 websocket协议
-
-`Sec-WebSocket-Version: 13` 协议的版本为13
-
-`Sec-WebSocket-Key: I6qjdEaqYljv3+9x+GrhqA==` 这个是base64 encode 的值，是浏览器随机生成的，与服务器响应的 `Sec-WebSocket-Accept`对应
+![img](C:\Users\king\Desktop\go并发\e7787d959b60d66cc3a46ee921098865.jpg)
 
 ```
-# Request Headers
-Connection: Upgrade
-Host: im.91vh.com
-Origin: http://im.91vh.com
-Pragma: no-cache
-Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits
-Sec-WebSocket-Key: I6qjdEaqYljv3+9x+GrhqA==
-Sec-WebSocket-Version: 13
-Upgrade: websocket
-```
 
-![浏览器 Network](https://img.mukewang.com/5d4d2336000197a315881044.png)
+// 复制Mutex定义的常量
+const (
+    mutexLocked = 1 << iota // 加锁标识位置
+    mutexWoken              // 唤醒标识位置
+    mutexStarving           // 锁饥饿标识位置
+    mutexWaiterShift = iota // 标识waiter的起始bit位置
+)
 
-- 2. 服务器响应升级协议
+// 扩展一个Mutex结构
+type Mutex struct {
+    sync.Mutex
+}
 
-服务端接收到升级协议的请求，如果服务端支持升级协议会做如下响应
+// 尝试获取锁
+func (m *Mutex) TryLock() bool {
+    // 如果能成功抢到锁
+    if atomic.CompareAndSwapInt32((*int32)(unsafe.Pointer(&m.Mutex)), 0, mutexLocked) {
+        return true
+    }
 
-返回: 
+    // 如果处于唤醒、加锁或者饥饿状态，这次请求就不参与竞争了，返回false
+    old := atomic.LoadInt32((*int32)(unsafe.Pointer(&m.Mutex)))
+    if old&(mutexLocked|mutexStarving|mutexWoken) != 0 {
+        return false
+    }
 
-`Status Code: 101 Switching Protocols` 表示支持切换协议
-
-```
-# Response Headers
-Connection: upgrade
-Date: Fri, 09 Aug 2019 07:36:59 GMT
-Sec-WebSocket-Accept: mB5emvxi2jwTUhDdlRtADuBax9E=
-Server: nginx/1.12.1
-Upgrade: websocket
-```
-
-- 3. 升级协议完成以后，客户端和服务器就可以相互发送数据
-
-![websocket接收和发送数据](https://img.mukewang.com/5d4d23a50001fd6a15800716.png)
-
-## 3、如何实现基于webSocket的长连接系统
-
-### 3.1 使用go实现webSocket服务端
-
-#### 3.1.1 启动端口监听
-- websocket需要监听端口，所以需要在`golang` 成功的 `main` 函数中用协程的方式去启动程序
-- **main.go** 实现启动
-
-```
-go websocket.StartWebSocket()
-```
-- **init_acc.go** 启动程序
-
-```
-// 启动程序
-func StartWebSocket() {
-	http.HandleFunc("/acc", wsPage)
-	http.ListenAndServe(":8089", nil)
+    // 尝试在竞争的状态下请求锁
+    new := old | mutexLocked
+    return atomic.CompareAndSwapInt32((*int32)(unsafe.Pointer(&m.Mutex)), old, new)
 }
 ```
 
-#### 3.1.2 升级协议
-- 客户端是通过http请求发送到服务端，我们需要对http协议进行升级为websocket协议
-- 对http请求协议进行升级 golang 库[gorilla/websocket](https://github.com/gorilla/websocket) 已经做得很好了，我们直接使用就可以了
-- 在实际使用的时候，建议每个连接使用两个协程处理客户端请求数据和向客户端发送数据，虽然开启协程会占用一些内存，但是读取分离，减少收发数据堵塞的可能
-- **init_acc.go**
+#### 获取等待者的数量等指标
 
 ```
-func wsPage(w http.ResponseWriter, req *http.Request) {
 
-	// 升级协议
-	conn, err := (&websocket.Upgrader{CheckOrigin: func(r *http.Request) bool {
-		fmt.Println("升级协议", "ua:", r.Header["User-Agent"], "referer:", r.Header["Referer"])
+const (
+    mutexLocked = 1 << iota // mutex is locked
+    mutexWoken
+    mutexStarving
+    mutexWaiterShift = iota
+)
 
-		return true
-	}}).Upgrade(w, req, nil)
-	if err != nil {
-		http.NotFound(w, req)
+type Mutex struct {
+    sync.Mutex
+}
 
-		return
-	}
-
-	fmt.Println("webSocket 建立连接:", conn.RemoteAddr().String())
-
-	currentTime := uint64(time.Now().Unix())
-	client := NewClient(conn.RemoteAddr().String(), conn, currentTime)
-
-	go client.read()
-	go client.write()
-
-	// 用户连接事件
-	clientManager.Register <- client
+func (m *Mutex) Count() int {
+    // 获取state字段的值
+    v := atomic.LoadInt32((*int32)(unsafe.Pointer(&m.Mutex)))
+    v = v >> mutexWaiterShift //得到等待者的数值
+    v = v + (v & mutexLocked) //再加上锁持有者的数量，0或者1
+    return int(v)
 }
 ```
 
-#### 3.1.3 客户端连接的管理
-- 当前程序有多少用户连接，还需要对用户广播的需要，这里我们就需要一个管理者(clientManager)，处理这些事件:
-- 记录全部的连接、登录用户的可以通过 **appId+uuid** 查到用户连接
-- 使用map存储，就涉及到多协程并发读写的问题，所以需要加读写锁
-- 定义四个channel ，分别处理客户端建立连接、用户登录、断开连接、全员广播事件
+#### 使用 Mutex 实现一个线程安全的队列
 
 ```
-// 连接管理
-type ClientManager struct {
-	Clients     map[*Client]bool   // 全部的连接
-	ClientsLock sync.RWMutex       // 读写锁
-	Users       map[string]*Client // 登录的用户 // appId+uuid
-	UserLock    sync.RWMutex       // 读写锁
-	Register    chan *Client       // 连接连接处理
-	Login       chan *login        // 用户登录处理
-	Unregister  chan *Client       // 断开连接处理程序
-	Broadcast   chan []byte        // 广播 向全部成员发送数据
+
+type SliceQueue struct {
+    data []interface{}
+    mu   sync.Mutex
 }
 
-// 初始化
-func NewClientManager() (clientManager *ClientManager) {
-	clientManager = &ClientManager{
-		Clients:    make(map[*Client]bool),
-		Users:      make(map[string]*Client),
-		Register:   make(chan *Client, 1000),
-		Login:      make(chan *login, 1000),
-		Unregister: make(chan *Client, 1000),
-		Broadcast:  make(chan []byte, 1000),
-	}
-
-	return
+func NewSliceQueue(n int) (q *SliceQueue) {
+    return &SliceQueue{data: make([]interface{}, 0, n)}
 }
-```
 
-#### 3.1.4 注册客户端的socket的写的异步处理程序
-- 防止发生程序崩溃，所以需要捕获异常
-- 为了显示异常崩溃位置这里使用`string(debug.Stack())`打印调用堆栈信息
-- 如果写入数据失败了，可能连接有问题，就关闭连接
-- **client.go**
+// Enqueue 把值放在队尾
+func (q *SliceQueue) Enqueue(v interface{}) {
+    q.mu.Lock()
+    q.data = append(q.data, v)
+    q.mu.Unlock()
+}
 
-```
-// 向客户端写数据
-func (c *Client) write() {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("write stop", string(debug.Stack()), r)
-
-		}
-	}()
-
-	defer func() {
-		clientManager.Unregister <- c
-		c.Socket.Close()
-		fmt.Println("Client发送数据 defer", c)
-	}()
-
-	for {
-		select {
-		case message, ok := <-c.Send:
-			if !ok {
-				// 发送数据错误 关闭连接
-				fmt.Println("Client发送数据 关闭连接", c.Addr, "ok", ok)
-
-				return
-			}
-
-			c.Socket.WriteMessage(websocket.TextMessage, message)
-		}
-	}
+// Dequeue 移去队头并返回
+func (q *SliceQueue) Dequeue() interface{} {
+    q.mu.Lock()
+    if len(q.data) == 0 {
+        q.mu.Unlock()
+        return nil
+    }
+    v := q.data[0]
+    q.data = q.data[1:]
+    q.mu.Unlock()
+    return v
 }
 ```
 
-#### 3.1.5 注册客户端的socket的读的异步处理程序
-- 循环读取客户端发送的数据并处理
-- 如果读取数据失败了，关闭channel
-- **client.go**
+## RWMutex
+
+RWMutex 在某一时刻只能由任意数量的 reader 持有，或者是只被单个的 writer 持有。
+
+- **Lock/Unlock：写操作时调用的方法。**如果锁已经被 reader 或者 writer 持有，那么，Lock 方法会一直阻塞，直到能获取到锁；Unlock 则是配对的释放锁的方法。
+- **RLock/RUnlock：读操作时调用的方法。**如果锁已经被 writer 持有的话，RLock 方法会一直阻塞，直到能获取到锁，否则就直接返回；而 RUnlock 是 reader 释放锁的方法。
+- **RLocker：这个方法的作用是为读操作返回一个 Locker 接口的对象。**它的 Lock 方法会调用 RWMutex 的 RLock 方法，它的 Unlock 方法会调用 RWMutex 的 RUnlock 方法。
+
+readers-writers 问题一般有三类，基于对读和写操作的优先级，读写锁的设计和实现也分成三类。
+
+- ​	**Read-preferring：**读优先的设计可以提供很高的并发性，但是，在竞争激烈的情况下可能会导致写饥饿。这是因为，如果有大量的读，这种设计会导致只有所有的读都释放了锁之后，写才可能获取到锁。
+- **Write-preferring：**写优先的设计意味着，如果已经有一个 writer 在等待请求锁的话，它会阻止新来的请求锁的 reader 获取到锁，所以优先保障 writer。当然，如果有一些 reader 已经请求了锁的话，新请求的 writer 也会等待已经存在的 reader 都释放锁之后才能获取。所以，写优先级设计中的优先权是针对新来的请求而言的。这种设计主要避免了 writer 的饥饿问题。
+- **不指定优先级：**这种设计比较简单，不区分 reader 和 writer 优先级，某些场景下这种不指定优先级的设计反而更有效，因为第一类优先级会导致写饥饿，第二类优先级可能会导致读饥饿，这种不指定优先级的访问不再区分读写，大家都是同一个优先级，解决了饥饿的问题。
+
+#### RWMutex 的 3 个踩坑点
+
+	1. 不可复制
+ 	2. 重入导致死锁
+ 	3. 释放未加锁的 RWMutex
+
+
+
+## WaitGroup
+
+## Cond
+
+Cond 通常应用于等待某个条件的一组 goroutine，等条件变为 true 的时候，其中一个 goroutine 或者所有的 goroutine 都会被唤醒执行。
+
+使用 Cond 常见的两个错误，一个是调用 Wait 的时候没有加锁，另一个是没有检查条件是否满足程序就继续执行了。
+
+在实践中，处理等待 / 通知的场景时，我们常常会使用 Channel 替换 Cond，因为 Channel 类型使用起来更简洁，而且不容易出错。但是对于需要重复调用 Broadcast 的场景，比如上面 Kubernetes 的例子，每次往队列中成功增加了元素后就需要调用 Broadcast 通知所有的等待者，使用 Cond 就再合适不过了。
+
+## Once
+
+Once 可以用来执行且仅仅执行一次动作，常常用于单例对象的初始化场景。
+
+sync.Once 只暴露了一个方法 Do，你可以多次调用 Do 方法，但是只有第一次调用 Do 方法时 f 参数才会执行，这里的 f 是一个无参数无返回值的函数。
+
+在实际的使用中，绝大多数情况下，你会使用闭包的方式去初始化外部的一个资源。
+
+Once 常常用来初始化单例资源，或者并发访问只需初始化一次的共享资源，或者在测试的时候初始化一次测试资源。
+
+**自己实现一个类似 Once 的并发原语，既可以返回当前调用 Do 方法是否正确完成，还可以在初始化失败后调用 Do 方法再次尝试初始化，直到初始化成功才不再初始化了。**
 
 ```
-// 读取客户端数据
-func (c *Client) read() {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("write stop", string(debug.Stack()), r)
-		}
-	}()
 
-	defer func() {
-		fmt.Println("读取客户端数据 关闭send", c)
-		close(c.Send)
-	}()
-
-	for {
-		_, message, err := c.Socket.ReadMessage()
-		if err != nil {
-			fmt.Println("读取客户端数据 错误", c.Addr, err)
-
-			return
-		}
-
-		// 处理程序
-		fmt.Println("读取客户端数据 处理:", string(message))
-		ProcessData(c, message)
-	}
+// 一个功能更加强大的Once
+type Once struct {
+    m    sync.Mutex
+    done uint32
+}
+// 传入的函数f有返回值error，如果初始化失败，需要返回失败的error
+// Do方法会把这个error返回给调用者
+func (o *Once) Do(f func() error) error {
+    if atomic.LoadUint32(&o.done) == 1 { //fast path
+        return nil
+    }
+    return o.slowDo(f)
+}
+// 如果还没有初始化
+func (o *Once) slowDo(f func() error) error {
+    o.m.Lock()
+    defer o.m.Unlock()
+    var err error
+    if o.done == 0 { // 双检查，还没有初始化
+        err = f()
+        if err == nil { // 初始化成功才将标记置为已初始化
+            atomic.StoreUint32(&o.done, 1)
+        }
+    }
+    return err
 }
 ```
 
-#### 3.1.6 接收客户端数据并处理
-- 约定发送和接收请求数据格式，为了js处理方便，采用了`json`的数据格式发送和接收数据(人类可以阅读的格式在工作开发中使用是比较方便的)
+## 线程安全的map类型
 
-- 登录发送数据示例:
+1. 使用 map 的 2 种常见错误:
+
+   未初始化和并发读写
+
+2. 加读写锁：扩展 map，支持并发读写
+
+3. 分片加锁：更高效的并发 map。减少锁的粒度常用的方法就是分片（Shard），将一把锁分成几把锁，每个锁控制一个分片。GetShard 是一个关键的方法，能够根据 key 计算出分片索引。
+
+**应对特殊场景的 sync.Map**
+
+只会增长的缓存系统中，一个 key 只写入一次而被读很多次；
+
+多个 goroutine 为不相交的键集读、写和重写键值对。
+
+## sync.Pool
+
+sync.Pool 数据类型用来保存一组可独立访问的临时对象。请注意这里加粗的“临时”这两个字，它说明了 sync.Pool 这个数据类型的特点，也就是说，它池化的对象会在未来的某个时候被毫无预兆地移除掉。而且，如果没有别的对象引用这个被移除的对象的话，这个被移除的对象就会被垃圾回收掉。
+
+1. sync.Pool 本身就是线程安全的，多个 goroutine 可以并发地调用它的方法存取对象；
+2. sync.Pool 不可在使用之后再复制使用。
+
+#### sync.Pool 的使用方法
+
+1. New
+
+   Pool struct 包含一个 New 字段，这个字段的类型是函数 func() interface{}。当调用 Pool 的 Get 方法从池中获取元素，没有更多的空闲元素可返回时，就会调用这个 New 方法来创建新的元素。如果你没有设置 New 字段，没有更多的空闲元素可返回时，Get 方法将返回 nil，表明当前没有可用的元素。
+
+2. Get
+
+   如果调用这个方法，就会从 Pool取走一个元素，这也就意味着，这个元素会从 Pool 中移除，返回给调用者。不过，除了返回值是正常实例化的元素，Get 方法的返回值还可能会是一个 nil（Pool.New 字段没有设置，又没有空闲元素可以返回），所以你在使用的时候，可能需要判断。
+
+3. Put
+
+   这个方法用于将一个元素返还给 Pool，Pool 会把这个元素保存到池中，并且可以复用。但如果 Put 一个 nil 值，Pool 就会忽略这个值。
+
+## Context：信息穿透上下文
+
+上下文信息传递 （request-scoped），比如处理 http 请求、在请求处理链路上传递信息；
+
+控制子 goroutine 的运行；
+
+超时控制的方法调用；
+
+可以取消的方法调用。
+
+1. Deadline 方法会返回这个 Context 被取消的截止日期。如果没有设置截止日期，ok 的值是 false。后续每次调用这个对象的 Deadline 方法时，都会返回和第一次调用相同的结果。
+
+2. Done 方法返回一个 Channel 对象。在 Context 被取消时，此 Channel 会被 close，如果没被取消，可能会返回 nil。后续的 Done 调用总是返回相同的结果。当 Done 被 close 的时候，你可以通过 ctx.Err 获取错误信息。Done 这个方法名其实起得并不好，因为名字太过笼统，不能明确反映 Done 被 close 的原因，因为 cancel、timeout、deadline 都可能导致 Done 被 close，不过，目前还没有一个更合适的方法名称。如果 Done 没有被 close，Err 方法返回 nil；如果 Done 被 close，Err 方法会返回 Done 被 close 的原因。
+
+   
+
+3. Value 返回此 ctx 中和指定的 key 相关联的 value。
+
+context.Background()：返回一个非 nil 的、空的 Context，没有任何值，不会被 cancel，不会超时，没有截止日期。一般用在主函数、初始化、测试以及创建根 Context 的时候。
+
+context.TODO()：返回一个非 nil 的、空的 Context，没有任何值，不会被 cancel，不会超时，没有截止日期。当你不清楚是否该用 Context，或者目前还不知道要传递一些什么上下文信息的时候，就可以使用这个方法。
+
+在使用 Context 的时候，有一些约定俗成的规则：
+
+1. 一般函数使用 Context 的时候，会把这个参数放在第一个参数的位置。
+2. 从来不把 nil 当做 Context 类型的参数值，可以使用 context.Background() 创建一个空的上下文对象，也不要使用 nil。
+3. Context 只用来临时做函数之间的上下文透传，不能持久化 Context 或者把 Context 长久保存。把 Context 持久化到数据库、本地文件或者全局变量、缓存中都是错误的用法。
+4. key 的类型不应该是字符串类型或者其它内建类型，否则容易在包之间使用 Context 时候产生冲突。使用 WithValue 时，key 的类型应该是自己定义的类型。
+5. 常常使用 struct{}作为底层类型定义 key 的类型。对于 exported key 的静态类型，常常是接口或者指针。这样可以尽量减少内存分配。
+
+**创建特殊用途 Context 的方法**
+
+1. WithValue 基于 parent Context 生成一个新的 Context，保存了一个 key-value 键值对。它常常用来传递上下文。
+2. WithCancel 方法返回 parent 的副本，只是副本中的 Done Channel 是新建的对象，它的类型是 cancelCtx。
+3. WithTimeout 其实是和 WithDeadline 一样，只不过一个参数是超时时间，一个参数是截止时间。超时时间加上当前时间，其实就是截止时间，
+4. WithDeadline 会返回一个 parent 的副本，并且设置了一个不晚于参数 d 的截止时间，类型为 timerCtx（或者是 cancelCtx）。
+
+atomic 操作的对象是一个地址，你需要把可寻址的变量的地址作为参数传递给方法，而不是把变量的值传递给方法。
+
+1. Add
+
+你可以利用计算机补码的规则，把减法变成加法
+
 ```
-{"seq":"1565336219141-266129","cmd":"login","data":{"userId":"马远","appId":101}}
-```
-- 登录响应数据示例:
-```
-{"seq":"1565336219141-266129","cmd":"login","response":{"code":200,"codeMsg":"Success","data":null}}
-```
-- websocket是双向的数据通讯，可以连续发送，如果发送的数据需要服务端回复，就需要一个**seq**来确定服务端的响应是回复哪一次的请求数据
-- cmd 是用来确定动作，websocket没有类似于http的url,所以规定 cmd 是什么动作
-- 目前的动作有:login/heartbeat 用来发送登录请求和连接保活(长时间没有数据发送的长连接容易被浏览器、移动中间商、nginx、服务端程序断开)
-- 为什么需要AppId,UserId是表示用户的唯一字段，设计的时候为了做成通用性，设计AppId用来表示用户在哪个平台登录的(web、app、ios等)，方便后续扩展
 
-- **request_model.go** 约定的请求数据格式
-
-```
-/************************  请求数据  **************************/
-// 通用请求数据格式
-type Request struct {
-	Seq  string      `json:"seq"`            // 消息的唯一Id
-	Cmd  string      `json:"cmd"`            // 请求命令字
-	Data interface{} `json:"data,omitempty"` // 数据 json
-}
-
-// 登录请求数据
-type Login struct {
-	ServiceToken string `json:"serviceToken"` // 验证用户是否登录
-	AppId        uint32 `json:"appId,omitempty"`
-	UserId       string `json:"userId,omitempty"`
-}
-
-// 心跳请求数据
-type HeartBeat struct {
-	UserId string `json:"userId,omitempty"`
-}
-```
-
-- **response_model.go**
-
-```
-/************************  响应数据  **************************/
-type Head struct {
-	Seq      string    `json:"seq"`      // 消息的Id
-	Cmd      string    `json:"cmd"`      // 消息的cmd 动作
-	Response *Response `json:"response"` // 消息体
-}
-
-type Response struct {
-	Code    uint32      `json:"code"`
-	CodeMsg string      `json:"codeMsg"`
-	Data    interface{} `json:"data"` // 数据 json
-}
-
+AddUint32(&x, ^uint32(c-1)).
 ```
 
 
-#### 3.1.7 使用路由的方式处理客户端的请求数据
 
-- 使用路由的方式处理由客户端发送过来的请求数据
-- 以后添加请求类型以后就可以用类是用http相类似的方式(router-controller)去处理
-- **acc_routers.go**
+2. CAS （CompareAndSwap）这个方法会比较当前 addr 地址里的值是不是 old，如果不等于 old，就返回 false；如果等于 old，就把此地址的值替换成 new 值，返回 true。这就相当于“判断相等才替换”。
+3. Swap如果不需要比较旧值，只是比较粗暴地替换的话，就可以使用 Swap 方法，它替换后还可以返回旧值
+4. LoadLoad 方法会取出 addr 地址中的值，即使在多处理器、多核、有 CPU cache 的情况下，这个操作也能保证 Load 是一个原子操作。
+5. Store 方法会把一个值存入到指定的 addr 地址中，即使在多处理器、多核、有 CPU cache 的情况下，这个操作也能保证 Store 是一个原子操作。别的 goroutine 通过 Load 读取出来，不会看到存取了一半的值。
+
+## channel
+
+执行业务处理的 goroutine 不要通过共享内存的方式通信，而是要通过 Channel 通信的方式分享数据。
+
+**Channel 的应用场景分为五种类型**
+
+1. 数据交流：当作并发的 buffer 或者 queue，解决生产者 - 消费者问题。多个 goroutine 可以并发当作生产者（Producer）和消费者（Consumer）。
+2. 数据传递：一个 goroutine 将数据交给另一个 goroutine，相当于把数据的拥有权 (引用) 托付出去。
+3. 信号通知：一个 goroutine 可以将信号 (closing、closed、data ready 等) 传递给另一个或者另一组 goroutine 。
+4. 任务编排：可以让一组 goroutine 按照一定的顺序并发或者串行的执行，这就是编排的功能。
+5. 锁：利用 Channel 也可以实现互斥锁的机制。
+
+通过 make，我们可以初始化一个 chan，未初始化的 chan 的零值是 nil。你可以设置它的容量，比如下面的 chan 的容量是 9527，我们把这样的 chan 叫做 buffered chan；如果没有设置，它的容量是 0，我们把这样的 chan 叫做 unbuffered chan。
+
+nil 是 chan 的零值，是一种特殊的 chan，对值是 nil 的 chan 的发送接收调用者总是会阻塞。
+
+
+
+1. 发送数据
 
 ```
-// Websocket 路由
-func WebsocketInit() {
-	websocket.Register("login", websocket.LoginController)
-	websocket.Register("heartbeat", websocket.HeartbeatController)
-}
-```
 
-#### 3.1.8 防止内存溢出和Goroutine不回收
-- 1. 定时任务清除超时连接
-没有登录的连接和登录的连接6分钟没有心跳则断开连接
-
-**client_manager.go**
+ch <- 2000
 
 ```
-// 定时清理超时连接
-func ClearTimeoutConnections() {
-    currentTime := uint64(time.Now().Unix())
 
-    for client := range clientManager.Clients {
-        if client.IsHeartbeatTimeout(currentTime) {
-            fmt.Println("心跳时间超时 关闭连接", client.Addr, client.UserId, client.LoginTime, client.HeartbeatTime)
+2. 接收数据
 
-            client.Socket.Close()
+   ```
+   
+     x := <-ch // 把接收的一条数据赋值给变量x
+     foo(<-ch) // 把接收的一个的数据作为参数传给函数
+     <-ch // 丢弃接收的一条数据
+   ```
+
+   接收数据时，还可以返回两个值。第一个值是返回的 chan 中的元素，很多人不太熟悉的是第二个值。第二个值是 bool 类型，代表是否成功地从 chan 中读取到一个值，如果第二个参数是 false，chan 已经被 close 而且 chan 中没有缓存的数据，这个时候，第一个值是零值。所以，如果从 chan 读取到一个零值，可能是 sender 真正发送的零值，也可能是 closed 的并且没有缓存元素产生的零值。
+
+3. 其它操作
+
+   ```
+   
+   func main() {
+       var ch = make(chan int, 10)
+       for i := 0; i < 10; i++ {
+           select {
+           case ch <- i:
+           case v := <-ch:
+               fmt.Println(v)
+           }
+       }
+   }
+   
+   
+   
+   
+   
+       for v := range ch {
+           fmt.Println(v)
+       }
+       
+       
+       
+       忽略读取的值，只是清空 chan：
+       
+       for range ch {
+       }
+   
+   ```
+
+   
+
+   1. 共享资源的并发访问使用传统并发原语；
+   2. 复杂的任务编排和消息传递使用 Channel；
+   3. 消息通知机制使用 Channel，除非只想 signal 一个 goroutine，才使用 Cond；
+   4. 简单等待所有任务的完成用 WaitGroup，也有 Channel 的推崇者用 Channel，都可以；
+   5. 需要和 Select 语句结合，使用 Channel；
+   6. 需要和超时配合时，使用 Channel 和 Context。
+
+   
+
+   ![img](C:\Users\king\Desktop\go并发\分布式\5108954ea36559860e5e5aaa42b2f998.jpg)
+
+   
+
+### 使用反射操作 Channel
+
+```
+
+func main() {
+    var ch1 = make(chan int, 10)
+    var ch2 = make(chan int, 10)
+
+    // 创建SelectCase
+    var cases = createCases(ch1, ch2)
+
+    // 执行10次select
+    for i := 0; i < 10; i++ {
+        chosen, recv, ok := reflect.Select(cases)
+        if recv.IsValid() { // recv case
+            fmt.Println("recv:", cases[chosen].Dir, recv, ok)
+        } else { // send case
+            fmt.Println("send:", cases[chosen].Dir, ok)
         }
     }
 }
-```
 
-- 2. 读写的Goroutine有一个失败，则相互关闭
-`write()`Goroutine写入数据失败，关闭`c.Socket.Close()`连接，会关闭`read()`Goroutine
-`read()`Goroutine读取数据失败，关闭`close(c.Send)`连接，会关闭`write()`Goroutine
-
-- 3. 客户端主动关闭
-关闭读写的Goroutine
-从`ClientManager`删除连接
-
-- 4. 监控用户连接、Goroutine数
-十个内存溢出有九个和Goroutine有关
-添加一个http的接口，可以查看系统的状态，防止Goroutine不回收
-[查看系统状态](http://im.91vh.com/system/state?isDebug=true)
-
-- 5. Nginx 配置不活跃的连接释放时间，防止忘记关闭的连接
-
-- 6. 使用 pprof 分析性能、耗时
-
-### 3.2 使用javaScript实现webSocket客户端
-#### 3.2.1 启动并注册监听程序
-- js 建立连接，并处理连接成功、收到数据、断开连接的事件处理
-
-```
-ws = new WebSocket("ws://127.0.0.1:8089/acc");
-
- 
-ws.onopen = function(evt) {
-  console.log("Connection open ...");
-};
- 
-ws.onmessage = function(evt) {
-  console.log( "Received Message: " + evt.data);
-  data_array = JSON.parse(evt.data);
-  console.log( data_array);
-};
- 
-ws.onclose = function(evt) {
-  console.log("Connection closed.");
-};
-
-```
+func createCases(chs ...chan int) []reflect.SelectCase {
+    var cases []reflect.SelectCase
 
 
-#### 3.2.2 发送数据
-- 需要注意:连接建立成功以后才可以发送数据
-- 建立连接以后由客户端向服务器发送数据示例
-
-```
-登录:
-ws.send('{"seq":"2323","cmd":"login","data":{"userId":"11","appId":101}}');
-
-心跳:
-ws.send('{"seq":"2324","cmd":"heartbeat","data":{}}');
-
-ping 查看服务是否正常:
-ws.send('{"seq":"2325","cmd":"ping","data":{}}');
-
-关闭连接:
-ws.close();
-```
-
-## 3.3 发送消息
-### 3.3.1 文本消息
-
-客户端只要知道发送用户是谁，还有内容就可以显示文本消息，这里我们重点关注一下数据部分
-
-target：定义接收的目标，目前未设置
-
-type：消息的类型，text 文本消息 img 图片消息 
-
-msg：文本消息内容
-
-from：消息的发送者
-
-文本消息的结构:
-
-```json
-{
-  "seq": "1569080188418-747717",
-  "cmd": "msg",
-  "response": {
-    "code": 200,
-    "codeMsg": "Ok",
-    "data": {
-      "target": "",
-      "type": "text",
-      "msg": "hello",
-      "from": "马超"
+    // 创建recv case
+    for _, ch := range chs {
+        cases = append(cases, reflect.SelectCase{
+            Dir:  reflect.SelectRecv,
+            Chan: reflect.ValueOf(ch),
+        })
     }
-  }
+
+    // 创建send case
+    for i, ch := range chs {
+        v := reflect.ValueOf(i)
+        cases = append(cases, reflect.SelectCase{
+            Dir:  reflect.SelectSend,
+            Chan: reflect.ValueOf(ch),
+            Send: v,
+        })
+    }
+
+    return cases
 }
 ```
 
-这样一个文本消息的结构就设计完成了，客户端在接收到消息内容就可以展现到 IM 界面上
+### 消息交流
 
-### 3.3.2 图片和语言消息
+1. 第一个例子是 worker 池的例子。
 
-发送图片消息，发送消息者的客户端需要先把图片上传到文件服务器，上传成功以后获得图片访问的 URL，然后由发送消息者的客户端需要将图片 URL 发送到 gowebsocket，gowebsocket 图片的消息格式发送给目标客户端，消息接收者客户端接收到图片的 URL 就可以显示图片消息。
-
-图片消息的结构:
+### 数据传递
 
 ```
-{
-  "type": "img",
-  "from": "马超",
-  "url": "http://91vh.com/images/home_logo.png",
-  "secret": "消息鉴权 secret",
-  "size": {
-    "width": 480,
-    "height": 720
-  }
+
+type Token struct{}
+
+func newWorker(id int, ch chan Token, nextCh chan Token) {
+    for {
+        token := <-ch         // 取得令牌
+        fmt.Println((id + 1)) // id从1开始
+        time.Sleep(time.Second)
+        nextCh <- token
+    }
+}
+func main() {
+    chs := []chan Token{make(chan Token), make(chan Token), make(chan Token), make(chan Token)}
+
+    // 创建4个worker
+    for i := 0; i < 4; i++ {
+        go newWorker(i, chs[i], chs[(i+1)%4])
+    }
+
+    //首先把令牌交给第一个worker
+    chs[0] <- struct{}{}
+  
+    select {}
 }
 ```
 
-语言消息、和视频消息和图片消息类似，都是先把文件上传服务器，然后通过 gowebsocket 传递文件的 URL，需要注意的是部分消息涉及到隐私的文件，文件访问的时候需要做好鉴权信息，不能让非接收用户也能查看到别人的消息内容。
-
-## 4、goWebSocket 项目
-### 4.1 项目说明
-- 本项目是基于webSocket实现的分布式IM系统
-- 客户端随机分配用户名，所有人进入一个聊天室，实现群聊的功能
-- 单台机器(24核128G内存)支持百万客户端连接
-- 支持水平部署，部署的机器之间可以相互通讯
-
-- 项目架构图
-![网站架构图](https://img.mukewang.com/5d4e510000018ff510320842.png)
-
-### 4.2 项目依赖
-
-- 本项目只需要使用 redis 和 golang 
-- 本项目使用govendor管理依赖，克隆本项目就可以直接使用
+### 信号通知
 
 ```
-# 主要使用到的包
-github.com/gin-gonic/gin@v1.4.0
-github.com/go-redis/redis
-github.com/gorilla/websocket
-github.com/spf13/viper
-google.golang.org/grpc
-github.com/golang/protobuf
-```
 
+func main() {
+    var closing = make(chan struct{})
+    var closed = make(chan struct{})
 
-### 4.3 项目启动 
-- 克隆项目
+    go func() {
+        // 模拟业务处理
+        for {
+            select {
+            case <-closing:
+                return
+            default:
+                // ....... 业务计算
+                time.Sleep(100 * time.Millisecond)
+            }
+        }
+    }()
 
-```
-git clone git@github.com:link1st/gowebsocket.git
-# 或
-git clone https://github.com/link1st/gowebsocket.git
-```
-- 修改项目配置
+    // 处理CTRL+C等中断信号
+    termChan := make(chan os.Signal)
+    signal.Notify(termChan, syscall.SIGINT, syscall.SIGTERM)
+    <-termChan
 
-```
-cd gowebsocket
-cd config
-mv app.yaml.example app.yaml
-# 修改项目监听端口，redis连接等(默认127.0.0.1:3306)
-vim app.yaml
-# 返回项目目录，为以后启动做准备
-cd ..
-```
-- 配置文件说明
+    close(closing)
+    // 执行退出之前的清理动作
+    go doCleanup(closed)
 
-```
-app:
-  logFile: log/gin.log # 日志文件位置
-  httpPort: 8080 # http端口
-  webSocketPort: 8089 # webSocket端口
-  rpcPort: 9001 # 分布式部署程序内部通讯端口
-  httpUrl: 127.0.0.1:8080
-  webSocketUrl:  127.0.0.1:8089
-
-
-redis:
-  addr: "localhost:6379"
-  password: ""
-  DB: 0
-  poolSize: 30
-  minIdleConns: 30
-```
-
-- 启动项目
-
-```
-go run main.go
-```
-
-- 进入IM聊天地址
-[http://127.0.0.1:8080/home/index](http://127.0.0.1:8080/home/index)
-- 到这里，就可以体验到基于webSocket的IM系统
-
-#### 4.4 接口文档 
-###### 4.4.1.1 接口说明
-##### 4.4.1 HTTP接口文档
-- 在接口开发和接口文档使用的过程中，规范开发流程，减少沟通成本，所以约定一下接口开发流程和文档说明
-- 接口地址
-
- 线上:http://im.91vh.com
-
- 测试:http://im.91vh.com
-
-
-###### 4.4.1.2 聊天页面
-- 地址:/home/index
-- 请求方式:GET
-- 接口说明:聊天页面
-- 请求参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| appId   |   是    | uint32 | appId/房间Id |   101      |
-
-- 返回参数:
-无
-
-
-###### 4.4.1.3 获取房间用户列表
-- 地址:/user/list
-- 请求方式:GET/POST
-- 接口说明:获取房间用户列表
-- 请求参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| appId   |   是    | uint32 | appId/房间Id |   101      |
-
-- 返回参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| code   |   是    | int   | 错误码  |   200  |
-| msg    |   是    | string| 错误信息 |Success |
-| data   |   是    | array | 返回数据 |        |
-| userCount   |   是    | int   | 房间内用户总数  |   1    |
-| userList| 是 | list  | 用户列表 |        |
-
-- 示例:
-
-```json
-{
-    "code": 200,
-    "msg": "Success",
-    "data": {
-        "userCount": 1,
-        "userList": [
-            "黄帝"
-        ]
+    select {
+    case <-closed:
+    case <-time.After(time.Second):
+        fmt.Println("清理超时，不等了")
     }
+    fmt.Println("优雅退出")
+}
+
+func doCleanup(closed chan struct{}) {
+    time.Sleep((time.Minute))
+    close(closed)
 }
 ```
 
-###### 4.4.1.4 查询用户是否在线
-- 地址:/user/online
-- 请求方式:GET/POST
-- 接口说明:查询用户是否在线
-- 请求参数:
+### 锁
 
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| appId   |   是    | uint32 | appId/房间Id |   101      |
-| userId   |   是    | string | 用户Id |   黄帝     |
-
-- 返回参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| code   |   是    | int   | 错误码  |   200  |
-| msg    |   是    | string| 错误信息 |Success |
-| data   |   是    | array | 返回数据 |        |
-| online   |   是    | bool   | 发送结果 true:在线 false:不在线  |   true    |
-| userId   |   是    | string | 用户Id |   黄帝     |
-
-- 示例:
-
-```json
-{
-    "code": 200,
-    "msg": "Success",
-    "data": {
-        "online": true,
-        "userId": "黄帝"
-    }
-}
 ```
 
-###### 4.4.1.5 给用户发送消息
-- 地址:/user/sendMessage
-- 请求方式:GET/POST
-- 接口说明:给用户发送消息
-- 请求参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| appId   |   是    | uint32 | appId/房间Id |   101      |
-| userId   |   是    | string | 用户id |   黄帝      |
-| message   |   是    | string | 消息内容 |   hello      |
-
-- 返回参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| code   |   是    | int   | 错误码  |   200  |
-| msg    |   是    | string| 错误信息 |Success |
-| data   |   是    | array | 返回数据 |        |
-| sendResults   |   是    | bool   | 发送结果 true:成功 false:失败  |   true    |
-
-- 示例:
-
-```json
-{
-    "code": 200,
-    "msg": "Success",
-    "data": {
-        "sendResults": true
-    }
+// 使用chan实现互斥锁
+type Mutex struct {
+    ch chan struct{}
 }
-```
 
-###### 4.4.1.6 给全员用户发送消息
-- 地址:/user/sendMessageAll
-- 请求方式:GET/POST
-- 接口说明:给全员用户发送消息
-- 请求参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| appId   |   是    | uint32 | appId/房间Id |   101      |
-| userId   |   是    | string | 用户id |   黄帝      |
-| msgId   |   是    | string | 消息Id |   避免重复发送      |
-| message   |   是    | string | 消息内容 |   hello      |
-
-- 返回参数:
-
-|  参数   |  必填   |  类型  |  说明   |  示例   |
-| :----: | :----: | :----: | :----: | :----: |
-| code   |   是    | int   | 错误码  |   200  |
-| msg    |   是    | string| 错误信息 |Success |
-| data   |   是    | array | 返回数据 |        |
-| sendResults   |   是    | bool   | 发送结果 true:成功 false:失败  |   true    |
-
-- 示例:
-
-```json
-{
-    "code": 200,
-    "msg": "Success",
-    "data": {
-        "sendResults": true
-    }
+// 使用锁需要初始化
+func NewMutex() *Mutex {
+    mu := &Mutex{make(chan struct{}, 1)}
+    mu.ch <- struct{}{}
+    return mu
 }
-```
 
-##### 4.4.2 RPC接口文档
-###### 4.4.2.1 接口说明
-- 接口协议结构体
-```proto
-syntax = "proto3";
+// 请求锁，直到获取到
+func (m *Mutex) Lock() {
+    <-m.ch
+}
 
-option java_multiple_files = true;
-option java_package = "io.grpc.examples.protobuf";
-option java_outer_classname = "ProtobufProto";
-
-
-package protobuf;
-
-// The AccServer service definition.
-service AccServer {
-    // 查询用户是否在线
-    rpc QueryUsersOnline (QueryUsersOnlineReq) returns (QueryUsersOnlineRsp) {
-    }
-    // 发送消息
-    rpc SendMsg (SendMsgReq) returns (SendMsgRsp) {
-    }
-    // 给这台机器的房间内所有用户发送消息
-    rpc SendMsgAll (SendMsgAllReq) returns (SendMsgAllRsp) {
-    }
-    // 获取用户列表
-    rpc GetUserList (GetUserListReq) returns (GetUserListRsp) {
+// 解锁
+func (m *Mutex) Unlock() {
+    select {
+    case m.ch <- struct{}{}:
+    default:
+        panic("unlock of unlocked mutex")
     }
 }
 
-// 查询用户是否在线
-message QueryUsersOnlineReq {
-    uint32 appId = 1; // AppID
-    string userId = 2; // 用户ID
+// 尝试获取锁
+func (m *Mutex) TryLock() bool {
+    select {
+    case <-m.ch:
+        return true
+    default:
+    }
+    return false
 }
 
-message QueryUsersOnlineRsp {
-    uint32 retCode = 1;
-    string errMsg = 2;
-    bool online = 3;
+// 加入一个超时的设置
+func (m *Mutex) LockTimeout(timeout time.Duration) bool {
+    timer := time.NewTimer(timeout)
+    select {
+    case <-m.ch:
+        timer.Stop()
+        return true
+    case <-timer.C:
+    }
+    return false
 }
 
-// 发送消息
-message SendMsgReq {
-    string seq = 1; // 序列号
-    uint32 appId = 2; // appId/房间Id
-    string userId = 3; // 用户ID
-    string cms = 4; // cms 动作: msg/enter/exit
-    string type = 5; // type 消息类型，默认是 text
-    string msg = 6; // msg
-    bool isLocal = 7; // 是否查询本机 acc内部调用为:true(本机查询不到即结束)
+// 锁是否已被持有
+func (m *Mutex) IsLocked() bool {
+    return len(m.ch) == 0
 }
 
-message SendMsgRsp {
-    uint32 retCode = 1;
-    string errMsg = 2;
-    string sendMsgId = 3;
-}
 
-// 给这台机器的房间内所有用户发送消息
-message SendMsgAllReq {
-    string seq = 1; // 序列号
-    uint32 appId = 2; // appId/房间Id
-    string userId = 3; // 不发送的用户ID
-    string cms = 4; // cms 动作: msg/enter/exit
-    string type = 5; // type 消息类型，默认是 text
-    string msg = 6; // msg
-}
-
-message SendMsgAllRsp {
-    uint32 retCode = 1;
-    string errMsg = 2;
-    string sendMsgId = 3;
-}
-
-// 获取用户列表
-message GetUserListReq {
-    uint32 appId = 1;
-}
-
-message GetUserListRsp {
-    uint32 retCode = 1;
-    string errMsg = 2;
-    repeated string userId = 3;
+func main() {
+    m := NewMutex()
+    ok := m.TryLock()
+    fmt.Printf("locked v %v\n", ok)
+    ok = m.TryLock()
+    fmt.Printf("locked %v\n", ok)
 }
 ```
 
-###### 4.4.2.2 查询用户是否在线
-- 参考上述协议结构体
-
-###### 4.4.2.3 发送消息
-###### 4.4.2.4 给指定房间所有用户发送消息
-###### 4.4.2.5 获取房间内全部用户
-
-## 5、webSocket项目Nginx配置
-### 5.1 为什么要配置Nginx
-- 使用nginx实现内外网分离，对外只暴露Nginx的Ip(一般的互联网企业会在nginx之前加一层LVS做负载均衡)，减少入侵的可能
-- 支持配置 ssl 证书，使用 `wss` 的方式实现数据加密，减少数据被抓包和篡改的可能性
-- 使用Nginx可以利用Nginx的负载功能，前端再使用的时候只需要连接固定的域名，通过Nginx将流量分发了到不同的机器
-- 同时我们也可以使用Nginx的不同的负载策略(轮询、weight、ip_hash)
-
-### 5.2 nginx配置
-- 使用域名 **im.91vh.com** 为示例，参考配置
-- 一级目录**im.91vh.com/acc** 是给webSocket使用，是用nginx stream转发功能(nginx 1.3.31 开始支持，使用Tengine配置也是相同的)，转发到golang 8089 端口处理
-- 其它目录是给HTTP使用，转发到golang 8080 端口处理
+### Or-Done 模式
 
 ```
-upstream  go-im
-{
-    server 127.0.0.1:8080 weight=1 max_fails=2 fail_timeout=10s;
-    keepalive 16;
-}
 
-upstream  go-acc
-{
-    server 127.0.0.1:8089 weight=1 max_fails=2 fail_timeout=10s;
-    keepalive 16;
-}
-
-
-server {
-    listen       80 ;
-    server_name  im.91vh.com;
-    index index.html index.htm ;
-
-
-    location /acc {
-        proxy_set_header Host $host;
-        proxy_pass http://go-acc;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_set_header Connection "";
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        client_max_body_size 10m;
+func or(channels ...<-chan interface{}) <-chan interface{} {
+    //特殊情况，只有0个或者1个
+    switch len(channels) {
+    case 0:
+        return nil
+    case 1:
+        return channels[0]
     }
 
-    location /
-    {
-        proxy_set_header Host $host;
-        proxy_pass http://go-im;
-        proxy_http_version 1.1;
-        proxy_set_header Connection "";
-        proxy_redirect off;
-        proxy_intercept_errors on;
-        client_max_body_size 30m;
-    }
+    orDone := make(chan interface{})
+    go func() {
+        defer close(orDone)
+        // 利用反射构建SelectCase
+        var cases []reflect.SelectCase
+        for _, c := range channels {
+            cases = append(cases, reflect.SelectCase{
+                Dir:  reflect.SelectRecv,
+                Chan: reflect.ValueOf(c),
+            })
+        }
 
-    access_log  /link/log/nginx/access/im.log;
-    error_log   /link/log/nginx/access/im.error.log;
+        // 随机选择一个可用的case
+        reflect.Select(cases)
+    }()
+
+
+    return orDone
 }
 ```
 
-### 5.3 问题处理
-- 运行nginx测试命令，查看配置文件是否正确
-
-```
-/link/server/tengine/sbin/nginx -t
+### 扇入模式
 
 ```
 
-- 如果出现错误
-
-```
-nginx: [emerg] unknown "connection_upgrade" variable
-configuration file /link/server/tengine/conf/nginx.conf test failed
-```
-
-- 处理方法
-- 在**nginx.com**添加
-
-```
-http{
-	fastcgi_temp_file_write_size 128k;
-..... # 需要添加的内容
-
-    #support websocket
-    map $http_upgrade $connection_upgrade {
-        default upgrade;
-        ''      close;
-    }
-
-.....
-    gzip on;
-    
-}
-
-```
-
-- 原因:Nginx代理webSocket的时候就会遇到Nginx的设计问题 **End-to-end and Hop-by-hop Headers** 
-
-
-## 6、压测
-### 6.1 Linux内核优化
-- 设置文件打开句柄数
-
-被压测服务器需要保持100W长连接，客户和服务器端是通过socket通讯的，每个连接需要建立一个socket，程序需要保持100W长连接就需要单个程序能打开100W个文件句柄
-
-```
-# 查看系统默认的值
-ulimit -n
-# 设置最大打开文件数
-ulimit -n 1000000
-```
-
-通过修改配置文件的方式修改程序最大打开句柄数
-
-```
-root soft nofile 1040000
-root hard nofile 1040000
-
-root soft nofile 1040000
-root hard nproc 1040000
-
-root soft core unlimited
-root hard core unlimited
-
-* soft nofile 1040000
-* hard nofile 1040000
-
-* soft nofile 1040000
-* hard nproc 1040000
-
-* soft core unlimited
-* hard core unlimited
-```
-
-修改完成以后需要重启机器配置才能生效
-
-- 修改系统级别文件句柄数量
-
-file-max的值需要大于limits设置的值
-
-```
-# file-max 设置的值参考
-cat /proc/sys/fs/file-max
-12553500
-```
-
-- 设置sockets连接参数
-
-`vim /etc/sysctl.conf` 
-
-```
-# 配置参考
-net.ipv4.tcp_tw_reuse = 1
-net.ipv4.tcp_tw_recycle = 0
-net.ipv4.ip_local_port_range = 1024 65000
-net.ipv4.tcp_mem = 786432 2097152 3145728
-net.ipv4.tcp_rmem = 4096 4096 16777216
-net.ipv4.tcp_wmem = 4096 4096 16777216
-```
-
-`sysctl -p` 修改配置以后使得配置生效命令
-
-### 6.2 压测准备
-- 待压测，如果大家有压测的结果欢迎补充
-- 后续会出专门的教程,从申请机器、写压测用例、内核优化、得出压测数据
-
-- **关于压测请移步**
-- [go实现的压测工具【单台机器100w连接压测实战】](https://github.com/link1st/go-stress-testing)
-- 用go语言实现一款压测工具，然后对本项目进行压测，实现单台机器100W长连接
-
-### 6.3 压测数据
-- 项目在实际使用的时候，每个连接约占 27Kb内存
-- 支持百万连接需要25G内存，单台机器实现百万长连接是可以实现的
-
-- 记录内存使用情况，分别记录了1W到100W连接数内存使用情况
-
-| 连接数      |  内存 |
-| :----:     | :----:|
-|   10000    | 281M  |
-|   100000   | 2.7g  |
-|   200000   | 5.4g  |
-|   500000   | 13.1g |
-|   1000000  | 25.8g |
-
-- [压测详细数据](https://github.com/link1st/go-stress-testing#65-%E5%8E%8B%E6%B5%8B%E6%95%B0%E6%8D%AE)
-
-## 7、如何基于webSocket实现一个分布式Im
-### 7.1 说明
-- 参考本项目源码
-- [gowebsocket v1.0.0 单机版Im系统](https://github.com/link1st/gowebsocket/tree/v1.0.0)
-- [gowebsocket v2.0.0 分布式Im系统](https://github.com/link1st/gowebsocket/tree/v2.0.0)
-
-- 为了方便演示，IM系统和webSocket(acc)系统合并在一个系统中
-- IM系统接口:
-获取全部在线的用户，查询当前服务的全部用户+集群中服务的全部用户
-发送消息，这里采用的是http接口发送(微信网页版发送消息也是http接口)，这里考虑主要是两点:
-1.服务分离，让acc系统尽量的简单一点，不掺杂其它业务逻辑
-2.发送消息是走http接口，不使用webSocket连接，采用收和发送数据分离的方式，可以加快收发数据的效率
-
-### 7.2 架构
-
-- 项目启动注册和用户连接时序图
-
-![用户连接时序图](https://img.mukewang.com/5de5d6bf00011c8e08740728.png)
-
-- 其它系统(IM、任务)向webSocket(acc)系统连接的用户发送消息时序图
-
-![分布是系统随机给用户发送消息](https://img.mukewang.com/5d4e56f70001e91711730688.png)
-
-### 7.3 分布式系统部署
-- 用水平部署两个项目(gowebsocket和gowebsocket1)演示分部署
-- 项目之间如何相互通讯:项目启动以后将项目Ip、rpcPort注册到redis中，让其它项目可以发现，需要通讯的时候使用gRpc进行通讯
-- gowebsocket
-
-```
-# app.yaml 配置文件信息
-app:
-  logFile: log/gin.log
-  httpPort: 8080
-  webSocketPort: 8089
-  rpcPort: 9001
-  httpUrl: im.91vh.com
-  webSocketUrl:  im.91vh.com
-
-# 在启动项目
-go run main.go 
-
-```
-
-- gowebsocket1 
-
-```
-# 将第一个项目拷贝一份
-cp -rf gowebsocket gowebsocket1
-# app.yaml 修改配置文件
-app:
-  logFile: log/gin.log
-  httpPort: 8081
-  webSocketPort: 8090
-  rpcPort: 9002
-  httpUrl: im.91vh.com
-  webSocketUrl:  im.91vh.com
-
-# 在启动第二个项目
-go run main.go 
-```
-
-- Nginx配置
-
-在之前Nginx配置项中添加第二台机器的Ip和端口
-
-```
-upstream  go-im
-{
-    server 127.0.0.1:8080 weight=1 max_fails=2 fail_timeout=10s;
-    server 127.0.0.1:8081 weight=1 max_fails=2 fail_timeout=10s;
-    keepalive 16;
-}
-
-upstream  go-acc
-{
-    server 127.0.0.1:8089 weight=1 max_fails=2 fail_timeout=10s;
-    server 127.0.0.1:8090 weight=1 max_fails=2 fail_timeout=10s;
-    keepalive 16;
+func fanInReflect(chans ...<-chan interface{}) <-chan interface{} {
+    out := make(chan interface{})
+    go func() {
+        defer close(out)
+        // 构造SelectCase slice
+        var cases []reflect.SelectCase
+        for _, c := range chans {
+            cases = append(cases, reflect.SelectCase{
+                Dir:  reflect.SelectRecv,
+                Chan: reflect.ValueOf(c),
+            })
+        }
+        
+        // 循环，从cases中选择一个可用的
+        for len(cases) > 0 {
+            i, v, ok := reflect.Select(cases)
+            if !ok { // 此channel已经close
+                cases = append(cases[:i], cases[i+1:]...)
+                continue
+            }
+            out <- v.Interface()
+        }
+    }()
+    return out
 }
 ```
 
-- 配置完成以后重启Nginx
-- 重启以后请求，验证是否符合预期:
+### 扇出模式
 
- 查看请求是否落在两个项目上
- 实验两个用户分别连接不同的项目(gowebsocket和gowebsocket1)是否也可以相互发送消息
+```
 
-- 关于分布式部署
+```
 
- 本项目只是演示了这个项目如何分布式部署，以及分布式部署以后模块如何进行相互通讯
- 完全解决系统没有单点的故障，还需 Nginx集群、redis cluster等
+### map-reduce
+
+这个程序使用 map-reduce 模式处理一组整数，map 函数就是为每个整数乘以 10，reduce 函数就是把 map 处理的结果累加起来：
+
+```
+package main
+
+import "fmt"
+
+func mapChan(in <-chan interface{}, fn func(interface{}) interface{}) <-chan interface{} {
+	out := make(chan interface{}) //创建一个输出chan
+	if in == nil { // 异常检查
+		close(out)
+		return out
+	}
+
+	go func() { // 启动一个goroutine,实现map的主要逻辑
+		defer close(out)
+		for v := range in { // 从输入chan读取数据，执行业务操作，也就是map操作
+			out <- fn(v)
+		}
+	}()
+
+	return out
+}
 
 
-## 8、回顾和反思
-### 8.1 在其它系统应用
-- 本系统设计的初衷就是:和客户端保持一个长连接、对外部系统两个接口(查询用户是否在线、给在线的用户推送消息)，实现业务的分离
-- 只有和业务分离可，才可以供多个业务使用，而不是每个业务都建立一个长连接
 
-#### 8.2 已经实现的功能
+func reduce(in <-chan interface{}, fn func(r, v interface{}) interface{}) interface{} {
+	if in == nil { // 异常检查
+		return nil
+	}
 
-- gin log日志(请求日志+debug日志)
-- 读取配置文件 完成
-- 定时脚本，清理过期未心跳连接 完成
-- http接口，获取登录、连接数量 完成
-- http接口，发送push、查询有多少人在线 完成
-- grpc 程序内部通讯，发送消息 完成
-- appIds 一个用户在多个平台登录
-- 界面，把所有在线的人拉倒一个群里面，发送消息 完成
-- ~~单聊~~、群聊 完成
-- 实现分布式，水平扩张 完成
-- 压测脚本
-- 文档整理
-- 文档目录、百万长连接的实现、为什么要实现一个IM、怎么实现一个Im 
-- 架构图以及扩展
+	out := <-in // 先读取第一个元素
+	for v := range in { // 实现reduce的主要逻辑
+		out = fn(out, v)
+	}
 
-IM实现细节:
+	return out
+}
 
-- 定义文本消息结构 完成
-- html发送文本消息 完成
-- 接口接收文本消息并发送给全体 完成
-- html接收到消息 显示到界面 完成
-- 界面优化 需要持续优化
-- 有人加入以后广播全体 完成
-- 定义加入聊天室的消息结构 完成
-- 引入机器人 待定
 
-### 8.2 需要完善、优化
-- 登录，使用微信登录 获取昵称、头像等
-- 有账号系统、资料系统
-- 界面优化、适配手机端
-- 消息 文本消息(支持表情)、图片、语音、视频消息
-- 微服务注册、发现、熔断等
-- 添加配置项，单台机器最大连接数量
+// 生成一个数据流
+func asStream(done <-chan struct{}) <-chan interface{} {
+	s := make(chan interface{})
+	values := []int{1, 2, 3, 4, 5}
+	go func() {
+		defer close(s)
+		for _, v := range values { // 从数组生成
+			select {
+			case <-done:
+				return
+			case s <- v:
+			}
+		}
+	}()
+	return s
+}
 
-### 8.3 总结
-- 虽然实现了一个分布式在聊天的IM，但是有很多细节没有处理(登录没有鉴权、界面还待优化等)，但是可以通过这个示例可以了解到:通过WebSocket解决很多业务上需求
-- 本文虽然号称单台机器能有百万长连接(内存上能满足)，但是实际在场景远比这个复杂(cpu有些压力)，当然了如果你有这么大的业务量可以购买更多的机器更好的去支撑你的业务，本程序只是演示如何在实际工作用使用webSocket.
-- 参考本文，你可以实现出来符合你需要的程序
+func main() {
+	in := asStream(nil)
 
-### 9、参考文献
+	// map操作: 乘以10
+	mapFn := func(v interface{}) interface{} {
+		return v.(int) * 10
+	}
 
-[维基百科 WebSocket](https://zh.wikipedia.org/wiki/WebSocket)
+	// reduce操作: 对map的结果进行累加
+	reduceFn := func(r, v interface{}) interface{} {
+		return r.(int) + v.(int)
+	}
 
-[阮一峰 WebSocket教程](http://www.ruanyifeng.com/blog/2017/05/websocket.html)
+	sum := reduce(mapChan(in, mapFn), reduceFn) //返回累加结果
+	fmt.Println(sum)
+}
+```
 
-[WebSocket协议：5分钟从入门到精通](https://www.cnblogs.com/chyingp/p/websocket-deep-in.html)
-
-[go-stress-testing 单台机器100w连接压测实战](https://github.com/link1st/go-stress-testing)
-
-github 搜:link1st 查看项目 gowebsocket
-
-[https://github.com/link1st/gowebsocket](https://github.com/link1st/gowebsocket)
-
-### 意见反馈
-
-- 在项目中遇到问题可以直接在这里找找答案或者提问 [issues](https://github.com/link1st/gowebsocket/issues)
-- 也可以添加我的微信(申请信息填写:公司、姓名，我好备注下)，直接反馈给我
-<br/>
-<p align="center">
-     <img border="0" src="https://img.mukewang.com/5eb376b60001ddc208300832.png" alt="添加link1st的微信" width="200"/>
-</p>
-
-### 赞助商
-
-- 感谢[JetBrains](https://www.jetbrains.com/?from=gowebsocket)对本项目的支持！
-<br/>
-<p align="center">
-    <a href="https://www.jetbrains.com/?from=gowebsocket">
-        <img border="0" src="https://img.mukewang.com/5e3967430001f8e120001668.png" width="200"/>
-    </a>
-</p>
